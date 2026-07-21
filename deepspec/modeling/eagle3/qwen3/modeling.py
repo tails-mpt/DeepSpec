@@ -231,6 +231,20 @@ class Qwen3Eagle3Model(Qwen3PreTrainedModel):
             config.hidden_size,
             bias=False,
         )
+        # EAGLE-3.1 "FC-norm" lever (gated by config.fc_norm, default False):
+        # RMSNorm the fused/concatenated aux hidden states before the fusion
+        # projection (self.fc). Normalizing the concatenated residual features
+        # counters unnormalized residual-magnitude growth (attention drift) and
+        # lifts long-context acceptance length. When fc_norm is False this stays
+        # None and project_hidden_states is byte-for-byte the prior v2 behavior.
+        self.fc_norm = (
+            Qwen3RMSNorm(
+                len(self.target_layer_ids) * config.hidden_size,
+                eps=config.rms_norm_eps,
+            )
+            if bool(getattr(config, "fc_norm", False))
+            else None
+        )
         self.layers = nn.ModuleList(
             [
                 Qwen3Eagle3DecoderLayer(config, layer_idx)
@@ -263,6 +277,8 @@ class Qwen3Eagle3Model(Qwen3PreTrainedModel):
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.size(-1) == len(self.target_layer_ids) * self.config.hidden_size
+        if self.fc_norm is not None:
+            hidden_states = self.fc_norm(hidden_states)
         return self.fc(hidden_states)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

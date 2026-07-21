@@ -87,6 +87,10 @@ def build_draft_config(*, target_config, model_args):
     draft_config.ttt_length = ttt_length
     draft_config.step_loss_decay = step_loss_decay
     draft_config.draft_num_hidden_layers = draft_num_hidden_layers
+    # EAGLE-3.1 "FC-norm" lever: RMSNorm the fused aux hidden states before the
+    # fusion projection (self.fc). Default False -> byte-for-byte identical to
+    # the v2 recipe. See Qwen3Eagle3Model.__init__ / project_hidden_states.
+    draft_config.fc_norm = bool(getattr(model_args, "fc_norm", False))
     draft_config.tie_word_embeddings = False
     draft_config._attn_implementation = TRAIN_ATTN_IMPLEMENTATION
     return draft_config
