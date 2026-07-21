@@ -187,9 +187,9 @@ def verify_draft_tokens(
     *,
     target_model,
     proposal: DraftProposal,
+    output_ids: torch.Tensor,
     position_ids: torch.Tensor,
     start: int,
-    past_key_values_target: DynamicCache,
     temperature: float,
     max_proposal_tokens: int,
     current_token_ids: torch.Tensor | None = None,
@@ -213,19 +213,38 @@ def verify_draft_tokens(
 
     draft_token_count = int(proposal.draft_token_count)
     verify_length = draft_token_count + 1
-    verify_position_ids = position_ids[:, start : start + verify_length]
-    target_output = target_model(
-        input_ids=proposal.verify_input_ids,
-        position_ids=verify_position_ids,
-        past_key_values=past_key_values_target,
-        use_cache=True,
+    # Full-recompute verify. Hybrid Mamba/SSM backbones (NemotronH) refuse a
+    # plain DynamicCache and cannot roll back recurrent state on rejection, so
+    # incremental KV-cache verification silently drops context (tau collapses to
+    # ~1.0). Recompute the whole committed prefix + verify tokens each step with
+    # use_cache=False; O(n^2) but exact. tau (draft quality) is the only metric
+    # taken from this eval -- speed is measured per-engine (PLAN.md methodology).
+    full_input_ids = torch.cat(
+        [output_ids[:, :start], proposal.verify_input_ids],
+        dim=1,
+    )
+    full_position_ids = position_ids[:, : start + verify_length]
+    full_output = target_model(
+        input_ids=full_input_ids,
+        position_ids=full_position_ids,
+        use_cache=False,
         output_hidden_states=True,
     )
-    if target_output.logits.ndim != 3:
+    if full_output.logits.ndim != 3:
         raise ValueError(
             "target model must return rank-3 logits [B, S, V], "
-            f"got ndim={target_output.logits.ndim}."
+            f"got ndim={full_output.logits.ndim}."
         )
+    # Slice the verify window (last `verify_length` positions = start ..
+    # start+draft_count) so the shape matches what the incremental path produced
+    # -- evaluator _update hooks read target_output.hidden_states over exactly
+    # this window.
+    target_output = SimpleNamespace(
+        logits=full_output.logits[:, -verify_length:, :],
+        hidden_states=tuple(
+            h[:, -verify_length:, :] for h in full_output.hidden_states
+        ),
+    )
     target_probs = logits_to_probs(target_output.logits, float(temperature))
     if (
         draft_token_count > 0
@@ -340,20 +359,23 @@ def generate_decoding_sample(
         device=device,
     )
     position_ids = torch.arange(output_ids.shape[1], device=device).unsqueeze(0)
-    past_key_values_target = DynamicCache()
 
+    # No target KV cache: hybrid Mamba/SSM backbones (NemotronH) refuse a plain
+    # DynamicCache and cannot roll back recurrent state on rejection, so we
+    # recompute the full sequence every target forward (see verify_draft_tokens).
     output = target_model(
         input_ids=input_ids,
         position_ids=position_ids[:, :num_input_tokens],
-        past_key_values=past_key_values_target,
-        use_cache=True,
+        use_cache=False,
         output_hidden_states=True,
-        logits_to_keep=1,
     )
 
     output_ids[:, :num_input_tokens] = input_ids
+    # Slice the last position explicitly: the prefill forward returns full
+    # [B, S, V] logits, and the next-token distribution is at the last prompt
+    # position (sampling the whole prompt's logits would put [1, S] into [1, 1]).
     output_ids[:, num_input_tokens : num_input_tokens + 1] = sample_from_probs(
-        logits_to_probs(output.logits, float(temperature))
+        logits_to_probs(output.logits[:, -1:, :], float(temperature))
     )
 
     start = input_ids.shape[1]
@@ -393,9 +415,9 @@ def generate_decoding_sample(
         verification = verify_draft_tokens(
             target_model=target_model,
             proposal=proposal,
+            output_ids=output_ids,
             position_ids=position_ids,
             start=start,
-            past_key_values_target=past_key_values_target,
             temperature=temperature,
             max_proposal_tokens=max_proposal_tokens,
             current_token_ids=output_ids[:, start : start + 1],
@@ -415,14 +437,12 @@ def generate_decoding_sample(
         if verification.terminated_by_stop_token:
             acceptance_lengths.append(accepted_draft_tokens)
             start += accepted_draft_tokens
-            past_key_values_target.crop(start)
             break
 
         output_ids[:, start + accepted_draft_tokens + 1] = verification.next_token
         new_token_ids = output_ids[:, start + 1 : start + accepted_draft_tokens + 2]
         acceptance_lengths.append(accepted_draft_tokens + 1)
         start += accepted_draft_tokens + 1
-        past_key_values_target.crop(start)
         update(context, verification)
 
         if has_stop_token(new_token_ids, stop_token_ids):

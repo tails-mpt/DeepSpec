@@ -42,8 +42,34 @@ def parse_args():
     parser.add_argument("--tensorboard-dir", type=str, default=None)
     parser.add_argument("--step", type=int, default=None,help=("step for tensorboard logging"),)
     parser.add_argument("--seed", type=int, default=980406)
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default=None,
+        help=("comma-separated subset of task names to run (default: all). "
+              f"Valid: {','.join(n for n, _ in TASKS)}"),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=("cap samples per task (min with each task's built-in cap); "
+              "use for fast tau checks."),
+    )
     args = parser.parse_args()
-    args.tasks = list(TASKS)
+    selected = list(TASKS)
+    if args.tasks:
+        names = {t.strip() for t in args.tasks.split(",") if t.strip()}
+        unknown = names - {n for n, _ in TASKS}
+        if unknown:
+            raise SystemExit(
+                f"unknown task(s): {sorted(unknown)}; "
+                f"valid: {[n for n, _ in TASKS]}"
+            )
+        selected = [(n, c) for n, c in TASKS if n in names]
+    if args.limit is not None:
+        selected = [(n, min(c, int(args.limit))) for n, c in selected]
+    args.tasks = selected
     return args
 
 
