@@ -20,7 +20,7 @@ from deepspec.utils.sampling import logits_to_probs, sample_tokens
 
 
 class Qwen3Eagle3Evaluator(BaseEvaluator):
-    EVAL_ATTN_IMPLEMENTATION = "sdpa"
+    EVAL_ATTN_IMPLEMENTATION = "eager"
     draft_model_cls = Qwen3Eagle3Model
 
     def __init__(self, local_rank: int, args):
@@ -43,6 +43,7 @@ class Qwen3Eagle3Evaluator(BaseEvaluator):
     def build_models(self) -> tuple[object, Qwen3Eagle3Model, AutoTokenizer]:
         target_model = AutoModelForCausalLM.from_pretrained(
             self.args.target_name_or_path,
+            trust_remote_code=True,
             dtype=torch.bfloat16,
             attn_implementation=self.EVAL_ATTN_IMPLEMENTATION,
         ).to(device=self.device).eval()
