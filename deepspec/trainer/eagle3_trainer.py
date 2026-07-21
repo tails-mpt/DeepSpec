@@ -21,9 +21,11 @@ class Qwen3Eagle3Trainer(BaseTrainer):
 
         tokenizer = AutoTokenizer.from_pretrained(
             model_args.target_model_name_or_path,
+            trust_remote_code=True,
         )
         target_config = AutoConfig.from_pretrained(
             model_args.target_model_name_or_path,
+            trust_remote_code=True,
         )
 
         draft_model = self._build_draft_model(
@@ -35,6 +37,7 @@ class Qwen3Eagle3Trainer(BaseTrainer):
         target_model = AutoModelForCausalLM.from_pretrained(
             model_args.target_model_name_or_path,
             dtype=self.precision_dtype,
+            trust_remote_code=True,
         ).to(device="cpu").eval()
         target_embed_tokens = target_model.get_input_embeddings()
         target_lm_head = target_model.get_output_embeddings()

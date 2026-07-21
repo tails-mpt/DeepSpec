@@ -60,6 +60,15 @@ def _get_target_backbone(target_model):
         if hasattr(target_model, "model") and hasattr(target_model.model, "language_model"):
             return target_model.model.language_model
         assert False, "Gemma4 target model must expose a text language_model."
+    if model_type == "nemotron_h":
+        # trust_remote_code=True routes AutoModel -> NemotronHForCausalLM (see
+        # config.json auto_map), whose base backbone submodule is `.backbone`
+        # (a NemotronHModel exposing `.embeddings`, `.layers`, `.norm_f`).
+        assert hasattr(target_model, "backbone"), (
+            "NemotronH target model must expose a `.backbone` submodule; load it "
+            "with trust_remote_code=True so AutoModel maps to NemotronHForCausalLM."
+        )
+        return target_model.backbone
     return getattr(target_model, "model", target_model)
 
 
@@ -67,6 +76,10 @@ def _get_target_hidden_size(target_model) -> int:
     model_type = str(target_model.config.model_type)
     if model_type in ("gemma4", "gemma4_unified"):
         return int(target_model.config.text_config.hidden_size)
+    if model_type == "nemotron_h":
+        # NemotronHConfig keeps the residual stream width at top-level
+        # `hidden_size` (2688); no nested text_config.
+        return int(target_model.config.hidden_size)
     return int(target_model.config.hidden_size)
 
 
@@ -112,13 +125,26 @@ def run_target_forward_with_hooks(
             )
 
         with torch.no_grad():
-            target_output = target_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=False,
-                use_cache=False,
-            )
-            target_last_hidden_states = target_output.last_hidden_state.detach()
+            model_type = str(target_model.config.model_type)
+            if model_type == "nemotron_h":
+                # AutoModel(trust_remote_code=True) returns NemotronHForCausalLM,
+                # whose output is a NemotronHCausalLMOutput with `.logits` but NO
+                # `.last_hidden_state`. Drive the base backbone directly to obtain
+                # the post-norm_f hidden state (and skip the wasted vocab lm_head).
+                backbone_output = backbone(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+                target_last_hidden_states = backbone_output.last_hidden_state.detach()
+            else:
+                target_output = target_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=False,
+                    use_cache=False,
+                )
+                target_last_hidden_states = target_output.last_hidden_state.detach()
             target_hidden_states = torch.cat(
                 [captured_hidden_states[layer_id] for layer_id in target_layer_ids],
                 dim=-1,
@@ -250,11 +276,19 @@ def main(local_rank: int):
     local_subset = Subset(dataset, range(local_start, local_end))
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.target_model_name_or_path,
+        trust_remote_code=True,
     )
+    # trust_remote_code=True is required for nemotron_h: the checkpoint stores
+    # weights under the `backbone.` prefix and only the bundled remote modeling
+    # code (self.backbone = NemotronHModel) matches it; the native
+    # transformers class uses self.model and would fail to load these weights.
+    # It is a no-op for native models (qwen3/gemma4 carry no auto_map).
     target_model = AutoModel.from_pretrained(
         config.model.target_model_name_or_path,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        # NemotronHForCausalLM (HF remote code) does not support SDPA; eager required.
+        attn_implementation="eager",
+        trust_remote_code=True,
     ).to(device=device).eval()
     target_hidden_size = _get_target_hidden_size(target_model)
     train_collator = ConversationCollator(

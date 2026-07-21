@@ -40,6 +40,22 @@ TEMPLATE_REGISTRY.register(
 )
 
 TEMPLATE_REGISTRY.register(
+    "nemotron",
+    ChatTemplate(
+        assistant_header="<|im_start|>assistant\n",
+        user_header="<|im_start|>user\n",
+        system_prompt=None,
+        end_of_turn_token="<|im_end|>\n",
+        # NVIDIA-Nemotron-3-Nano ChatML auto-injects an empty reasoning block
+        # after the assistant header (rendered: `<|im_start|>assistant\n`
+        # `<think></think>{content}<|im_end|>\n`). Treat it like Gemma4's
+        # channel prefix: strip it from the loss span so the draft is trained
+        # on the real assistant content, not the boilerplate.
+        assistant_loss_prefix="<think></think>",
+    ),
+)
+
+TEMPLATE_REGISTRY.register(
     "gemma4",
     ChatTemplate(
         assistant_header="<|turn>model\n",
