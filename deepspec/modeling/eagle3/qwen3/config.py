@@ -90,7 +90,13 @@ def build_draft_config(*, target_config, model_args):
     # EAGLE-3.1 "FC-norm" lever: RMSNorm the fused aux hidden states before the
     # fusion projection (self.fc). Default False -> byte-for-byte identical to
     # the v2 recipe. See Qwen3Eagle3Model.__init__ / project_hidden_states.
+    # fc_norm       = one RMSNorm over the full 5*hidden concat.
+    # fc_norm_perslice = one RMSNorm per hidden-size source slice (register
+    #                    alignment). Mutually exclusive; both default False.
     draft_config.fc_norm = bool(getattr(model_args, "fc_norm", False))
+    draft_config.fc_norm_perslice = bool(
+        getattr(model_args, "fc_norm_perslice", False)
+    )
     draft_config.tie_word_embeddings = False
     draft_config._attn_implementation = TRAIN_ATTN_IMPLEMENTATION
     return draft_config

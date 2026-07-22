@@ -245,6 +245,27 @@ class Qwen3Eagle3Model(Qwen3PreTrainedModel):
             if bool(getattr(config, "fc_norm", False))
             else None
         )
+        # EAGLE-3.1 "FC-norm" per-slice variant (gated by config.fc_norm_perslice,
+        # default False): RMSNorm EACH of the len(target_layer_ids) hidden_size
+        # source slices INDEPENDENTLY before concat/projection (register-alignment
+        # intent -- every aux layer's residual normed on its own scale). Independent
+        # norms -> a ModuleList of len(target_layer_ids) norms. Mutually exclusive
+        # with fc_norm; both default False -> byte-for-byte the prior v2 behavior.
+        fc_norm_perslice = bool(getattr(config, "fc_norm_perslice", False))
+        assert not (bool(getattr(config, "fc_norm", False)) and fc_norm_perslice), (
+            "fc_norm (full-concat) and fc_norm_perslice are mutually exclusive; "
+            "enable at most one."
+        )
+        self.fc_norm_perslice = (
+            nn.ModuleList(
+                [
+                    Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                    for _ in range(len(self.target_layer_ids))
+                ]
+            )
+            if fc_norm_perslice
+            else None
+        )
         self.layers = nn.ModuleList(
             [
                 Qwen3Eagle3DecoderLayer(config, layer_idx)
@@ -277,7 +298,16 @@ class Qwen3Eagle3Model(Qwen3PreTrainedModel):
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.size(-1) == len(self.target_layer_ids) * self.config.hidden_size
-        if self.fc_norm is not None:
+        if self.fc_norm_perslice is not None:
+            # Split the fused (..., 5*hidden) back into the 5 source slices in the
+            # SAME order they were concatenated (extract_eagle3_context_feature),
+            # RMSNorm each on hidden_size independently, then re-concat -> (..., 5*hidden).
+            slices = torch.split(hidden_states, self.config.hidden_size, dim=-1)
+            hidden_states = torch.cat(
+                [norm(slice_) for norm, slice_ in zip(self.fc_norm_perslice, slices)],
+                dim=-1,
+            )
+        elif self.fc_norm is not None:
             hidden_states = self.fc_norm(hidden_states)
         return self.fc(hidden_states)
 
